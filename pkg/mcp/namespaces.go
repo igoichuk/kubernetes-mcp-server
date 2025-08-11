@@ -22,7 +22,7 @@ func (s *Server) initNamespaces() []server.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(true),
 		), Handler: s.namespacesList,
 	})
-	if s.k.IsOpenShift(context.Background()) {
+	if s.k.GetDefaultManager().IsOpenShift(context.Background()) {
 		ret = append(ret, server.ServerTool{
 			Tool: mcp.NewTool("projects_list",
 				mcp.WithDescription("List all the OpenShift projects in the current cluster"),

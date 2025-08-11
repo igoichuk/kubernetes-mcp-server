@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -41,6 +42,140 @@ type Kubernetes struct {
 	manager *Manager
 }
 
+// ContextManager manages multiple Kubernetes contexts and their associated managers
+type ContextManager struct {
+	staticConfig    *config.StaticConfig
+	contextManagers map[string]*Manager
+	defaultManager  *Manager
+	mutex           sync.RWMutex
+}
+
+// NewContextManager creates a new context manager
+func NewContextManager(staticConfig *config.StaticConfig) (*ContextManager, error) {
+	defaultManager, err := NewManager(staticConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	cm := &ContextManager{
+		staticConfig:    staticConfig,
+		contextManagers: make(map[string]*Manager),
+		defaultManager:  defaultManager,
+	}
+
+	// Setup kubeconfig watching for the default manager
+	defaultManager.WatchKubeConfig(cm.reloadKubernetesClients)
+
+	return cm, nil
+}
+
+// GetManagerForContext returns a manager for the specified context, creating it if necessary
+func (cm *ContextManager) GetManagerForContext(contextName string) (*Manager, error) {
+	if contextName == "" {
+		return cm.defaultManager, nil
+	}
+
+	cm.mutex.RLock()
+	if manager, exists := cm.contextManagers[contextName]; exists {
+		cm.mutex.RUnlock()
+		return manager, nil
+	}
+	cm.mutex.RUnlock()
+
+	// Create new manager for the context
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+
+	// Double-check after acquiring write lock
+	if manager, exists := cm.contextManagers[contextName]; exists {
+		return manager, nil
+	}
+
+	// Create a new config with the specified context
+	configWithContext := *cm.staticConfig
+	configWithContext.KubeContext = contextName
+
+	manager, err := NewManager(&configWithContext)
+	if err != nil {
+		return nil, err
+	}
+
+	cm.contextManagers[contextName] = manager
+	klog.V(3).Infof("Created new Kubernetes manager for context: %s", contextName)
+
+	return manager, nil
+}
+
+// Derived returns a derived Kubernetes client for the default context
+func (cm *ContextManager) Derived(ctx context.Context) (*Kubernetes, error) {
+	return cm.GetDefaultManager().Derived(ctx)
+}
+
+// Derived returns a derived Kubernetes client for the specified context
+func (cm *ContextManager) DerivedContext(ctx context.Context, kubeContext string) (*Kubernetes, error) {
+	manager, err := cm.GetManagerForContext(kubeContext)
+	if err != nil {
+		return nil, err
+	}
+	return manager.Derived(ctx)
+}
+
+// DerivedFromRequest returns a derived Kubernetes client based on context from CallToolRequest
+func (cm *ContextManager) DerivedFromRequest(ctx context.Context, ctr interface{}) (*Kubernetes, error) {
+	var kubeContext string
+
+	// Try to extract context from arguments if available
+	if callRequest, ok := ctr.(interface{ GetArguments() map[string]interface{} }); ok {
+		if contextArg := callRequest.GetArguments()["context"]; contextArg != nil {
+			if contextStr, ok := contextArg.(string); ok {
+				kubeContext = contextStr
+			}
+		}
+	}
+
+	return cm.DerivedContext(ctx, kubeContext)
+}
+
+// reloadKubernetesClients reloads all kubernetes clients when kubeconfig changes
+func (cm *ContextManager) reloadKubernetesClients() error {
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+
+	// Reload default manager
+	if err := cm.defaultManager.initKubernetesClient(); err != nil {
+		klog.Errorf("Failed to reload default kubernetes client: %v", err)
+	}
+
+	// Clear context managers cache to force recreation on next access
+	for contextName, manager := range cm.contextManagers {
+		manager.Close()
+		delete(cm.contextManagers, contextName)
+		klog.V(3).Infof("Cleared cached manager for context: %s", contextName)
+	}
+
+	return nil
+}
+
+// Close closes all managers and stops watching
+func (cm *ContextManager) Close() {
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+
+	if cm.defaultManager != nil {
+		cm.defaultManager.Close()
+	}
+
+	for _, manager := range cm.contextManagers {
+		manager.Close()
+	}
+}
+
+func (cm *ContextManager) GetDefaultManager() *Manager {
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
+	return cm.defaultManager
+}
+
 type Manager struct {
 	cfg                     *rest.Config
 	clientCmdConfig         clientcmd.ClientConfig
@@ -59,31 +194,35 @@ var ParameterCodec = runtime.NewParameterCodec(Scheme)
 var _ helm.Kubernetes = &Manager{}
 
 func NewManager(config *config.StaticConfig) (*Manager, error) {
-	k8s := &Manager{
+	m := &Manager{
 		staticConfig: config,
 	}
-	if err := resolveKubernetesConfigurations(k8s); err != nil {
+	if err := m.initKubernetesClient(); err != nil {
 		return nil, err
 	}
-	// TODO: Won't work because not all client-go clients use the shared context (e.g. discovery client uses context.TODO())
-	//k8s.cfg.Wrap(func(original http.RoundTripper) http.RoundTripper {
-	//	return &impersonateRoundTripper{original}
-	//})
+	return m, nil
+}
+
+func (m *Manager) initKubernetesClient() error {
+	if err := resolveKubernetesConfigurations(m); err != nil {
+		return err
+	}
+
 	var err error
-	k8s.accessControlClientSet, err = NewAccessControlClientset(k8s.cfg, k8s.staticConfig)
+	m.accessControlClientSet, err = NewAccessControlClientset(m.cfg, m.staticConfig)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	k8s.discoveryClient = memory.NewMemCacheClient(k8s.accessControlClientSet.DiscoveryClient())
-	k8s.accessControlRESTMapper = NewAccessControlRESTMapper(
-		restmapper.NewDeferredDiscoveryRESTMapper(k8s.discoveryClient),
-		k8s.staticConfig,
+	m.discoveryClient = memory.NewMemCacheClient(m.accessControlClientSet.DiscoveryClient())
+	m.accessControlRESTMapper = NewAccessControlRESTMapper(
+		restmapper.NewDeferredDiscoveryRESTMapper(m.discoveryClient),
+		m.staticConfig,
 	)
-	k8s.dynamicClient, err = dynamic.NewForConfig(k8s.cfg)
+	m.dynamicClient, err = dynamic.NewForConfig(m.cfg)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return k8s, nil
+	return nil
 }
 
 func (m *Manager) WatchKubeConfig(onKubeConfigChange func() error) {
@@ -116,9 +255,7 @@ func (m *Manager) WatchKubeConfig(onKubeConfigChange func() error) {
 			}
 		}
 	}()
-	if m.CloseWatchKubeConfig != nil {
-		_ = m.CloseWatchKubeConfig()
-	}
+	m.Close() // Close any previous watcher
 	m.CloseWatchKubeConfig = watcher.Close
 }
 

@@ -50,7 +50,7 @@ type Server struct {
 	configuration *Configuration
 	server        *server.MCPServer
 	enabledTools  []string
-	k             *internalk8s.Manager
+	k             *internalk8s.ContextManager
 }
 
 func NewServer(configuration Configuration) (*Server, error) {
@@ -77,13 +77,12 @@ func NewServer(configuration Configuration) (*Server, error) {
 	if err := s.reloadKubernetesClient(); err != nil {
 		return nil, err
 	}
-	s.k.WatchKubeConfig(s.reloadKubernetesClient)
 
 	return s, nil
 }
 
 func (s *Server) reloadKubernetesClient() error {
-	k, err := internalk8s.NewManager(s.configuration.StaticConfig)
+	k, err := internalk8s.NewContextManager(s.configuration.StaticConfig)
 	if err != nil {
 		return err
 	}
@@ -128,7 +127,7 @@ func (s *Server) KubernetesApiVerifyToken(ctx context.Context, token string, aud
 	if s.k == nil {
 		return nil, nil, fmt.Errorf("kubernetes manager is not initialized")
 	}
-	return s.k.VerifyToken(ctx, token, audience)
+	return s.k.GetDefaultManager().VerifyToken(ctx, token, audience)
 }
 
 // GetKubernetesAPIServerHost returns the Kubernetes API server host from the configuration.
@@ -136,7 +135,7 @@ func (s *Server) GetKubernetesAPIServerHost() string {
 	if s.k == nil {
 		return ""
 	}
-	return s.k.GetAPIServerHost()
+	return s.k.GetDefaultManager().GetAPIServerHost()
 }
 
 func (s *Server) GetEnabledTools() []string {

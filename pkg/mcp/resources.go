@@ -15,7 +15,7 @@ import (
 
 func (s *Server) initResources() []server.ServerTool {
 	commonApiVersion := "v1 Pod, v1 Service, v1 Node, apps/v1 Deployment, networking.k8s.io/v1 Ingress"
-	if s.k.IsOpenShift(context.Background()) {
+	if s.k.GetDefaultManager().IsOpenShift(context.Background()) {
 		commonApiVersion += ", route.openshift.io/v1 Route"
 	}
 	commonApiVersion = fmt.Sprintf("(common apiVersion and kind include: %s)", commonApiVersion)
@@ -35,6 +35,9 @@ func (s *Server) initResources() []server.ServerTool {
 				mcp.Description("Optional Namespace to retrieve the namespaced resources from (ignored in case of cluster scoped resources). If not provided, will list resources from all namespaces")),
 			mcp.WithString("labelSelector",
 				mcp.Description("Optional Kubernetes label selector (e.g. 'app=myapp,env=prod' or 'app in (myapp,yourapp)'), use this option when you want to filter the pods by label"), mcp.Pattern("([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]")),
+			mcp.WithString("context",
+				mcp.Description("Optional Kubernetes context name to use for this operation. If not provided, will use the current context from kubeconfig"),
+			),
 			// Tool annotations
 			mcp.WithTitleAnnotation("Resources: List"),
 			mcp.WithReadOnlyHintAnnotation(true),
@@ -56,6 +59,9 @@ func (s *Server) initResources() []server.ServerTool {
 				mcp.Description("Optional Namespace to retrieve the namespaced resource from (ignored in case of cluster scoped resources). If not provided, will get resource from configured namespace"),
 			),
 			mcp.WithString("name", mcp.Description("Name of the resource"), mcp.Required()),
+			mcp.WithString("context",
+				mcp.Description("Optional Kubernetes context name to use for this operation. If not provided, will use the current context from kubeconfig"),
+			),
 			// Tool annotations
 			mcp.WithTitleAnnotation("Resources: Get"),
 			mcp.WithReadOnlyHintAnnotation(true),
@@ -68,6 +74,9 @@ func (s *Server) initResources() []server.ServerTool {
 			mcp.WithString("resource",
 				mcp.Description("A JSON or YAML containing a representation of the Kubernetes resource. Should include top-level fields such as apiVersion,kind,metadata, and spec"),
 				mcp.Required(),
+			),
+			mcp.WithString("context",
+				mcp.Description("Optional Kubernetes context name to use for this operation. If not provided, will use the current context from kubeconfig"),
 			),
 			// Tool annotations
 			mcp.WithTitleAnnotation("Resources: Create or Update"),
@@ -91,6 +100,9 @@ func (s *Server) initResources() []server.ServerTool {
 				mcp.Description("Optional Namespace to delete the namespaced resource from (ignored in case of cluster scoped resources). If not provided, will delete resource from configured namespace"),
 			),
 			mcp.WithString("name", mcp.Description("Name of the resource"), mcp.Required()),
+			mcp.WithString("context",
+				mcp.Description("Optional Kubernetes context name to use for this operation. If not provided, will use the current context from kubeconfig"),
+			),
 			// Tool annotations
 			mcp.WithTitleAnnotation("Resources: Delete"),
 			mcp.WithReadOnlyHintAnnotation(false),
@@ -128,7 +140,7 @@ func (s *Server) resourcesList(ctx context.Context, ctr mcp.CallToolRequest) (*m
 		return NewTextResult("", fmt.Errorf("namespace is not a string")), nil
 	}
 
-	derived, err := s.k.Derived(ctx)
+	derived, err := s.k.DerivedFromRequest(ctx, ctr)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +175,7 @@ func (s *Server) resourcesGet(ctx context.Context, ctr mcp.CallToolRequest) (*mc
 		return NewTextResult("", fmt.Errorf("name is not a string")), nil
 	}
 
-	derived, err := s.k.Derived(ctx)
+	derived, err := s.k.DerivedFromRequest(ctx, ctr)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +197,7 @@ func (s *Server) resourcesCreateOrUpdate(ctx context.Context, ctr mcp.CallToolRe
 		return NewTextResult("", fmt.Errorf("resource is not a string")), nil
 	}
 
-	derived, err := s.k.Derived(ctx)
+	derived, err := s.k.DerivedFromRequest(ctx, ctr)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +236,7 @@ func (s *Server) resourcesDelete(ctx context.Context, ctr mcp.CallToolRequest) (
 		return NewTextResult("", fmt.Errorf("name is not a string")), nil
 	}
 
-	derived, err := s.k.Derived(ctx)
+	derived, err := s.k.DerivedFromRequest(ctx, ctr)
 	if err != nil {
 		return nil, err
 	}

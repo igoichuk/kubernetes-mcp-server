@@ -34,7 +34,7 @@ func (s *Server) configurationView(_ context.Context, ctr mcp.CallToolRequest) (
 	if _, ok := minified.(bool); ok {
 		minify = minified.(bool)
 	}
-	ret, err := s.k.ConfigurationView(minify)
+	ret, err := s.k.GetDefaultManager().ConfigurationView(minify)
 	if err != nil {
 		return NewTextResult("", fmt.Errorf("failed to get configuration: %v", err)), nil
 	}
